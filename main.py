@@ -23,6 +23,13 @@ class NetworkNode:
         self.congestion = 0
         self.hop_count = 0  # NEW: Track hop count
 
+        # NEW: TCP Congestion Control
+        self.tcp_control = None  # Will be set to Tahoe or Reno
+        self.packet_loss_probability = 0.0  # Dynamic packet loss
+        self.last_ack_time = time.time()
+        self.timeout_threshold = 2.0  # seconds
+        self.packets_in_flight = 0
+        self.max_buffer_size = 10
     # NEW: Get congestion level category
     def get_congestion_level(self):
         """Returns congestion level: 'low', 'medium', 'high', 'critical'"""
@@ -48,6 +55,121 @@ class Packet:
         self.timestamp = time.time()  # NEW: Packet creation time
         self.completed = False  # NEW: Track if packet reached destination
 
+class TCPCongestionControl:
+    """Base class for TCP congestion control"""
+    def __init__(self):
+        self.cwnd = 1  # Congestion window (in packets)
+        self.ssthresh = 64  # Slow start threshold
+        self.state = "slow_start"  # States: slow_start, congestion_avoidance, fast_recovery
+        self.duplicate_acks = 0
+        self.packets_sent = 0
+        self.packets_acked = 0
+        
+    def on_ack_received(self):
+        """Called when ACK is received"""
+        pass
+    
+    def on_timeout(self):
+        """Called when timeout occurs"""
+        pass
+    
+    def on_duplicate_ack(self):
+        """Called when duplicate ACK is received"""
+        pass
+    
+    def get_window_size(self):
+        """Returns current congestion window size"""
+        return max(1, int(self.cwnd))
+
+class TCPTahoe(TCPCongestionControl):
+    """TCP Tahoe implementation"""
+    def __init__(self):
+        super().__init__()
+        self.algorithm = "Tahoe"
+    
+    def on_ack_received(self):
+        """Handle ACK in Tahoe"""
+        self.packets_acked += 1
+        self.duplicate_acks = 0
+        
+        if self.state == "slow_start":
+            # Exponential growth: cwnd += 1 per ACK
+            self.cwnd += 1
+            if self.cwnd >= self.ssthresh:
+                self.state = "congestion_avoidance"
+        
+        elif self.state == "congestion_avoidance":
+            # Linear growth: cwnd += 1/cwnd per ACK
+            self.cwnd += 1.0 / self.cwnd
+    
+    def on_timeout(self):
+        """Handle timeout in Tahoe"""
+        self.ssthresh = max(self.cwnd / 2, 2)
+        self.cwnd = 1
+        self.state = "slow_start"
+        self.duplicate_acks = 0
+    
+    def on_duplicate_ack(self):
+        """Handle duplicate ACK in Tahoe"""
+        self.duplicate_acks += 1
+        
+        # 3 duplicate ACKs = packet loss
+        if self.duplicate_acks >= 3:
+            self.on_timeout()  # Tahoe treats this like timeout
+
+class TCPReno(TCPCongestionControl):
+    """TCP Reno implementation with Fast Retransmit and Fast Recovery"""
+    def __init__(self):
+        super().__init__()
+        self.algorithm = "Reno"
+    
+    def on_ack_received(self):
+        """Handle ACK in Reno"""
+        self.packets_acked += 1
+        
+        if self.state == "slow_start":
+            # Exponential growth
+            self.cwnd += 1
+            self.duplicate_acks = 0
+            
+            if self.cwnd >= self.ssthresh:
+                self.state = "congestion_avoidance"
+        
+        elif self.state == "congestion_avoidance":
+            # Linear growth
+            self.cwnd += 1.0 / self.cwnd
+            self.duplicate_acks = 0
+        
+        elif self.state == "fast_recovery":
+            # Exit fast recovery
+            self.cwnd = self.ssthresh
+            self.state = "congestion_avoidance"
+            self.duplicate_acks = 0
+    
+    def on_timeout(self):
+        """Handle timeout in Reno"""
+        self.ssthresh = max(self.cwnd / 2, 2)
+        self.cwnd = 1
+        self.state = "slow_start"
+        self.duplicate_acks = 0
+    
+    def on_duplicate_ack(self):
+        """Handle duplicate ACK in Reno"""
+        self.duplicate_acks += 1
+        
+        if self.duplicate_acks == 3:
+            # Fast Retransmit
+            self.ssthresh = max(self.cwnd / 2, 2)
+            self.cwnd = self.ssthresh + 3
+            self.state = "fast_recovery"
+        
+        elif self.state == "fast_recovery":
+            # Inflate window
+            self.cwnd += 1
+
+
+
+
 class CloudNetworkSimulator:
     def __init__(self, root):
         self.root = root
@@ -72,6 +194,7 @@ class CloudNetworkSimulator:
 
         self.traffic_load = "medium"  # Options: "light", "medium", "heavy"
         self.packet_generation_rate = 1000  # milliseconds
+        self.congestion_algorithm = "Reno"  # Options: "Reno", "Tahoe"
 
          # NEW: Routing Analysis Variables
         self.routing_stats = {
@@ -246,6 +369,29 @@ class CloudNetworkSimulator:
                 btn.config(bg=color)  # Highlight default selection
 
 
+        # NEW: Congestion Control Algorithm Selection
+        algo_label = tk.Label(scrollable_frame, text="Congestion Control", 
+                            font=("Segoe UI", 11, "bold"),
+                            bg=self.colors['panel_bg'], fg=self.colors['text'])
+        algo_label.pack(pady=(20, 10))
+
+        algorithms = [
+            ("🐢 TCP Tahoe", "Tahoe"),
+            ("🚀 TCP Reno", "Reno")
+        ]
+
+        self.algo_buttons = {}
+        for label, algo in algorithms:
+            btn = tk.Button(scrollable_frame, text=label,
+                        command=lambda a=algo: self.set_congestion_algorithm(a),
+                        bg="#374151", fg="white", font=("Segoe UI", 9),
+                        relief=tk.FLAT, cursor="hand2", padx=10, pady=8)
+            btn.pack(pady=3, padx=10, fill=tk.X)
+            self.algo_buttons[algo] = btn
+            
+            if algo == "Reno":
+                btn.config(bg="#8b5cf6")  # Highlight default selection
+
         # Canvas
         canvas_frame = tk.Frame(main_container, bg=self.colors['canvas_bg'], 
                                highlightbackground=self.colors['accent'], highlightthickness=2)
@@ -336,6 +482,27 @@ class CloudNetworkSimulator:
         
         self.status_label.config(text=f"Traffic load set to: {load_level.upper()}")
 
+    def set_congestion_algorithm(self, algorithm):
+        """Change TCP congestion control algorithm: Tahoe or Reno"""
+        self.congestion_algorithm = algorithm
+        
+        # Update all nodes with new algorithm
+        for node in self.nodes:
+            if algorithm == "Tahoe":
+                node.tcp_control = TCPTahoe()
+            else:
+                node.tcp_control = TCPReno()
+        
+        # Update button colors
+        for algo, btn in self.algo_buttons.items():
+            if algo == algorithm:
+                btn.config(bg="#8b5cf6")
+            else:
+                btn.config(bg="#374151")
+        
+        self.status_label.config(text=f"Congestion control set to: TCP {algorithm}")
+
+
     def create_star_topology(self):
         """Star topology: central router with multiple PCs"""
         center_x, center_y = 600, 400
@@ -359,7 +526,14 @@ class CloudNetworkSimulator:
             router.connections.append(pc)
             pc.connections.append(router)
             self.connections.append((router, pc))
-    
+
+        # Initialize TCP congestion control for all nodes
+        for node in self.nodes:
+            if self.congestion_algorithm == "Tahoe":
+                node.tcp_control = TCPTahoe()
+            else:
+                node.tcp_control = TCPReno()
+
     def create_mesh_topology(self):
         """Mesh topology: all nodes connected to all other nodes"""
         positions = [
@@ -378,6 +552,13 @@ class CloudNetworkSimulator:
                 node1.connections.append(node2)
                 node2.connections.append(node1)
                 self.connections.append((node1, node2))
+
+        # Initialize TCP congestion control for all nodes
+        for node in self.nodes:
+            if self.congestion_algorithm == "Tahoe":
+                node.tcp_control = TCPTahoe()
+            else:
+                node.tcp_control = TCPReno()
     
     def create_ring_topology(self):
         """Ring topology: nodes connected in a circle"""
@@ -401,6 +582,13 @@ class CloudNetworkSimulator:
             node1.connections.append(node2)
             node2.connections.append(node1)
             self.connections.append((node1, node2))
+
+        # Initialize TCP congestion control for all nodes
+        for node in self.nodes:
+            if self.congestion_algorithm == "Tahoe":
+                node.tcp_control = TCPTahoe()
+            else:
+                node.tcp_control = TCPReno()
     
     def create_tree_topology(self):
         """Tree topology: hierarchical structure"""
@@ -439,6 +627,13 @@ class CloudNetworkSimulator:
                 switch.connections.append(pc)
                 pc.connections.append(switch)
                 self.connections.append((switch, pc))
+
+        # Initialize TCP congestion control for all nodes
+        for node in self.nodes:
+            if self.congestion_algorithm == "Tahoe":
+                node.tcp_control = TCPTahoe()
+            else:
+                node.tcp_control = TCPReno()
     
     def create_linear_topology(self):
         """Linear topology: nodes connected in a line"""
@@ -456,12 +651,26 @@ class CloudNetworkSimulator:
                 prev_node.connections.append(node)
                 node.connections.append(prev_node)
                 self.connections.append((prev_node, node))
+
+        # Initialize TCP congestion control for all nodes
+        for node in self.nodes:
+            if self.congestion_algorithm == "Tahoe":
+                node.tcp_control = TCPTahoe()
+            else:
+                node.tcp_control = TCPReno()
     
     def add_node(self, node_type):
         x = random.randint(100, 800)
         y = random.randint(100, 600)
         name = f"{node_type.upper()}{len([n for n in self.nodes if n.type == node_type]) + 1}"
         node = NetworkNode(x, y, node_type, name)
+        
+        # NEW: Initialize TCP congestion control
+        if self.congestion_algorithm == "Tahoe":
+            node.tcp_control = TCPTahoe()
+        else:
+            node.tcp_control = TCPReno()
+        
         self.nodes.append(node)
         self.draw_network()
         self.status_label.config(text=f"Added {name}")
@@ -614,7 +823,24 @@ class CloudNetworkSimulator:
                 self.canvas.create_text(node.x+25, node.y-15, 
                                        text=str(int(node.congestion)),
                                        font=("Segoe UI", 7, "bold"), fill="white")
-        
+
+            # NEW: Show TCP congestion control state
+            if node.tcp_control and self.simulation_running:
+                state_text = f"{node.tcp_control.algorithm[:1]}"  # T or R
+                state_color = "#10b981" if node.tcp_control.state == "slow_start" else \
+                            "#3b82f6" if node.tcp_control.state == "congestion_avoidance" else "#ef4444"
+                
+                self.canvas.create_rectangle(node.x-30, node.y+50, node.x-10, node.y+65,
+                                            fill=state_color, outline="white", width=1)
+                self.canvas.create_text(node.x-20, node.y+57, text=state_text,
+                                    font=("Segoe UI", 8, "bold"), fill="white")
+                
+                # Show cwnd
+                cwnd_text = f"W:{node.tcp_control.get_window_size()}"
+                self.canvas.create_text(node.x+15, node.y+57, text=cwnd_text,
+                                    font=("Segoe UI", 7), fill=self.colors['text'])
+
+
         if self.simulation_running:
             self.root.after(50, self.draw_network)
             
@@ -633,32 +859,99 @@ class CloudNetworkSimulator:
             
     def start_packet_generation(self):
         if self.simulation_running and len(self.nodes) > 1:
-            # Generate random packet
+            # Select random source and destination
             source = random.choice(self.nodes)
             destination = random.choice([n for n in self.nodes if n != source])
             
-            # Use Dijkstra for shortest path
-            path, total_latency = self.dijkstra_shortest_path(source, destination)
-            if path:
-                packet = Packet(source, destination, path)
-                packet.total_latency = total_latency
-                self.packets.append(packet)
+            # Check if source can send (congestion window check)
+            if source.tcp_control and source.packets_in_flight < source.tcp_control.get_window_size():
+                path, total_latency = self.dijkstra_shortest_path(source, destination)
                 
-                # Update congestion with traffic load factor
-                congestion_factor = 1
-                if self.traffic_load == "light":
-                    congestion_factor = 0.5
-                elif self.traffic_load == "heavy":
-                    congestion_factor = 2
-                
-                for node in path:
-                    node.congestion = min(10, node.congestion + congestion_factor)
-                
-                # NEW: Track performance metrics
-                self.track_performance(total_latency, len(path))
+                if path:
+                    # Simulate packet loss based on congestion
+                    packet_loss = False
+                    for node in path:
+                        # Packet loss probability increases with congestion
+                        node.packet_loss_probability = min(0.3, node.congestion * 0.03)
+                        if random.random() < node.packet_loss_probability:
+                            packet_loss = True
+                            break
+                    
+                    if packet_loss:
+                        # Handle packet loss
+                        source.tcp_control.on_duplicate_ack()
+                        
+                        # Update congestion based on algorithm state
+                        if source.tcp_control.state == "slow_start":
+                            congestion_factor = 0.5
+                        elif source.tcp_control.state == "fast_recovery":
+                            congestion_factor = 1.5
+                        else:
+                            congestion_factor = 1.0
+                        
+                        for node in path:
+                            node.congestion = min(10, node.congestion + congestion_factor * 0.5)
+                    else:
+                        # Successfully send packet
+                        packet = Packet(source, destination, path)
+                        packet.total_latency = total_latency
+                        packet.cwnd = source.tcp_control.get_window_size()
+                        packet.algorithm = source.tcp_control.algorithm
+                        self.packets.append(packet)
+                        
+                        source.packets_in_flight += 1
+                        source.tcp_control.packets_sent += 1
+                        
+                        # Simulate ACK after packet completes journey
+                        self.root.after(int(total_latency), 
+                                    lambda: self.handle_packet_ack(source, path))
+                        
+                        # Update congestion based on cwnd
+                        congestion_factor = 1.0 / max(1, source.tcp_control.get_window_size())
+                        
+                        if self.traffic_load == "light":
+                            congestion_factor *= 0.5
+                        elif self.traffic_load == "heavy":
+                            congestion_factor *= 2
+                        
+                        for node in path:
+                            node.congestion = min(10, node.congestion + congestion_factor)
+                    
+                    # Track performance
+                    self.track_performance(total_latency, len(path))
             
-            # NEW: Use dynamic packet generation rate
+            # Check for timeouts
+            self.check_timeouts()
+            
+            # Continue packet generation
             self.root.after(self.packet_generation_rate, self.start_packet_generation)
+
+    def handle_packet_ack(self, source, path):
+        """Handle ACK reception"""
+        if source.tcp_control:
+            source.tcp_control.on_ack_received()
+            source.packets_in_flight = max(0, source.packets_in_flight - 1)
+            source.last_ack_time = time.time()
+            
+            # Reduce congestion when ACK is received
+            for node in path:
+                node.congestion = max(0, node.congestion - 0.2)
+
+    def check_timeouts(self):
+        """Check for packet timeouts"""
+        current_time = time.time()
+        
+        for node in self.nodes:
+            if node.tcp_control and node.packets_in_flight > 0:
+                if current_time - node.last_ack_time > node.timeout_threshold:
+                    # Timeout occurred
+                    node.tcp_control.on_timeout()
+                    node.packets_in_flight = 0
+                    node.last_ack_time = current_time
+                    
+                    # Increase congestion on timeout
+                    node.congestion = min(10, node.congestion + 2)
+
     # NEW: Track performance over time
     def track_performance(self, latency, hops):
         """Track latency and throughput metrics over time"""
@@ -1290,7 +1583,9 @@ class CloudNetworkSimulator:
                             font=("Segoe UI", 10, "bold"),
                             relief=tk.FLAT, cursor="hand2", padx=20, pady=10)
         clear_btn.pack(side=tk.LEFT, padx=5)
-        
+    
+    
+
     def show_node_info(self, node):
         info = f"Node: {node.name}\n"
         info += f"Type: {node.type.upper()}\n"
@@ -1352,6 +1647,21 @@ class CloudNetworkSimulator:
             for node in congested_nodes:
                 text.insert(tk.END, f"  - {node.name}: {node.congestion:.1f}\n")
 
+        # NEW: TCP Congestion Control Statistics
+        text.insert(tk.END, "\n" + "=" * 50 + "\n")
+        text.insert(tk.END, "TCP CONGESTION CONTROL\n")
+        text.insert(tk.END, "=" * 50 + "\n\n")
+        text.insert(tk.END, f"Algorithm: TCP {self.congestion_algorithm}\n\n")
+
+        for node in self.nodes[:5]:  # Show first 5 nodes
+            if node.tcp_control:
+                text.insert(tk.END, f"{node.name}:\n")
+                text.insert(tk.END, f"  State: {node.tcp_control.state}\n")
+                text.insert(tk.END, f"  CWND: {node.tcp_control.get_window_size()}\n")
+                text.insert(tk.END, f"  SSThresh: {node.tcp_control.ssthresh:.1f}\n")
+                text.insert(tk.END, f"  Packets Sent: {node.tcp_control.packets_sent}\n")
+                text.insert(tk.END, f"  Packets ACKed: {node.tcp_control.packets_acked}\n")
+                text.insert(tk.END, f"  In Flight: {node.packets_in_flight}\n\n")
         # NEW: Routing Statistics Summary
         text.insert(tk.END, "\n" + "=" * 50 + "\n")
         text.insert(tk.END, "ROUTING STATISTICS\n")
