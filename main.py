@@ -195,6 +195,9 @@ class CloudNetworkSimulator:
         self.traffic_load = "medium"  # Options: "light", "medium", "heavy"
         self.packet_generation_rate = 1000  # milliseconds
         self.congestion_algorithm = "Reno"  # Options: "Reno", "Tahoe"
+        
+        # NEW: Manual packet sending flag
+        self.manual_packet_mode = False
 
          # NEW: Routing Analysis Variables
         self.routing_stats = {
@@ -255,6 +258,10 @@ class CloudNetworkSimulator:
         
         self.create_button(btn_frame, "🧭 Routing", 
                           self.show_routing_analysis, '#ec4899').pack(side=tk.LEFT, padx=5)
+        
+        # NEW: Manual Packet Sending button
+        self.create_button(btn_frame, "📤 Send Packet", 
+                          self.show_manual_packet_sender, '#f59e0b').pack(side=tk.LEFT, padx=5)
         
         self.create_button(btn_frame, "🔄 Reset", 
                           self.reset_network, self.colors['warning']).pack(side=tk.LEFT, padx=5)
@@ -1698,6 +1705,226 @@ class CloudNetworkSimulator:
         }
         self.draw_network()
         self.status_label.config(text="Network reset")
+    
+    # NEW: Show Manual Packet Sender Window
+    def show_manual_packet_sender(self):
+        """Open dialog to manually send packets between selected nodes"""
+        if len(self.nodes) < 2:
+            messagebox.showwarning("Not Enough Nodes", "Add at least 2 nodes to send a packet")
+            return
+        
+        if not self.simulation_running:
+            messagebox.showwarning("Simulation Not Running", "Start the simulation before sending packets manually")
+            return
+        
+        sender_window = tk.Toplevel(self.root)
+        sender_window.title("Manual Packet Sender")
+        sender_window.geometry("450x400")
+        sender_window.configure(bg=self.colors['bg'])
+        
+        # Title
+        title = tk.Label(sender_window, text="📤 Send Packet Manually", 
+                        font=("Segoe UI", 16, "bold"),
+                        bg=self.colors['bg'], fg=self.colors['text'])
+        title.pack(pady=20)
+        
+        # Selection Frame
+        select_frame = tk.Frame(sender_window, bg=self.colors['panel_bg'])
+        select_frame.pack(pady=10, padx=20, fill=tk.X)
+        
+        # Source selection
+        tk.Label(select_frame, text="Source Node:", 
+                bg=self.colors['panel_bg'], fg=self.colors['text'],
+                font=("Segoe UI", 11)).grid(row=0, column=0, padx=10, pady=10, sticky='w')
+        
+        source_var = tk.StringVar()
+        source_dropdown = ttk.Combobox(select_frame, textvariable=source_var, 
+                                      values=[node.name for node in self.nodes],
+                                      state='readonly', width=20)
+        source_dropdown.grid(row=0, column=1, padx=10, pady=10)
+        if self.nodes:
+            source_dropdown.current(0)
+        
+        # Destination selection
+        tk.Label(select_frame, text="Destination Node:", 
+                bg=self.colors['panel_bg'], fg=self.colors['text'],
+                font=("Segoe UI", 11)).grid(row=1, column=0, padx=10, pady=10, sticky='w')
+        
+        dest_var = tk.StringVar()
+        dest_dropdown = ttk.Combobox(select_frame, textvariable=dest_var,
+                                     values=[node.name for node in self.nodes],
+                                     state='readonly', width=20)
+        dest_dropdown.grid(row=1, column=1, padx=10, pady=10)
+        if len(self.nodes) > 1:
+            dest_dropdown.current(1)
+        
+        # Number of packets to send
+        tk.Label(select_frame, text="Number of Packets:", 
+                bg=self.colors['panel_bg'], fg=self.colors['text'],
+                font=("Segoe UI", 11)).grid(row=2, column=0, padx=10, pady=10, sticky='w')
+        
+        num_packets_var = tk.StringVar(value="1")
+        num_packets_spinbox = tk.Spinbox(select_frame, from_=1, to=10, 
+                                         textvariable=num_packets_var,
+                                         bg=self.colors['canvas_bg'], 
+                                         fg=self.colors['text'],
+                                         font=("Segoe UI", 11), width=10)
+        num_packets_spinbox.grid(row=2, column=1, padx=10, pady=10, sticky='w')
+        
+        # Information display
+        info_frame = tk.Frame(sender_window, bg=self.colors['canvas_bg'])
+        info_frame.pack(pady=15, padx=20, fill=tk.BOTH, expand=True)
+        
+        info_text = tk.Text(info_frame, bg=self.colors['canvas_bg'], 
+                           fg=self.colors['text'], font=("Consolas", 9),
+                           wrap=tk.WORD, height=12)
+        info_text.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        
+        # Display initial info
+        info_text.config(state=tk.NORMAL)
+        info_text.insert(tk.END, "Packet Sending Information:\n\n")
+        info_text.insert(tk.END, "• Select a source and destination node\n")
+        info_text.insert(tk.END, "• Specify number of packets to send (1-10)\n")
+        info_text.insert(tk.END, "• Click 'Send Packet(s)' to transmit\n\n")
+        info_text.insert(tk.END, "The packet will:\n")
+        info_text.insert(tk.END, "- Find the shortest path using Dijkstra's\n")
+        info_text.insert(tk.END, "- Animate across the network\n")
+        info_text.insert(tk.END, "- Follow TCP congestion control rules\n")
+        info_text.insert(tk.END, "- Track latency and hop count\n")
+        info_text.config(state=tk.DISABLED)
+        
+        def send_packets():
+            source_name = source_var.get()
+            dest_name = dest_var.get()
+            
+            if not source_name or not dest_name:
+                messagebox.showwarning("Selection Required", "Please select both source and destination")
+                return
+            
+            if source_name == dest_name:
+                messagebox.showwarning("Same Node", "Source and destination must be different")
+                return
+            
+            try:
+                num_packets = int(num_packets_var.get())
+                if num_packets < 1 or num_packets > 10:
+                    messagebox.showwarning("Invalid Count", "Number of packets must be between 1 and 10")
+                    return
+            except ValueError:
+                messagebox.showwarning("Invalid Input", "Please enter a valid number")
+                return
+            
+            # Find nodes
+            source_node = next((n for n in self.nodes if n.name == source_name), None)
+            dest_node = next((n for n in self.nodes if n.name == dest_name), None)
+            
+            if not source_node or not dest_node:
+                messagebox.showerror("Error", "Could not find selected nodes")
+                return
+            
+            # Send packets
+            sent_count = 0
+            for i in range(num_packets):
+                path, total_latency = self.dijkstra_shortest_path(source_node, dest_node)
+                
+                if path:
+                    # Check congestion window
+                    if source_node.tcp_control and source_node.packets_in_flight >= source_node.tcp_control.get_window_size():
+                        messagebox.showwarning("Congestion", f"Packet {i+1}: Cannot send - congestion window full!")
+                        continue
+                    
+                    # Simulate packet loss based on congestion
+                    packet_loss = False
+                    for node in path:
+                        node.packet_loss_probability = min(0.3, node.congestion * 0.03)
+                        if random.random() < node.packet_loss_probability:
+                            packet_loss = True
+                            break
+                    
+                    if packet_loss:
+                        # Handle packet loss
+                        if source_node.tcp_control:
+                            source_node.tcp_control.on_duplicate_ack()
+                        
+                        # Update congestion
+                        if source_node.tcp_control and source_node.tcp_control.state == "slow_start":
+                            congestion_factor = 0.5
+                        elif source_node.tcp_control and source_node.tcp_control.state == "fast_recovery":
+                            congestion_factor = 1.5
+                        else:
+                            congestion_factor = 1.0
+                        
+                        for node in path:
+                            node.congestion = min(10, node.congestion + congestion_factor * 0.5)
+                        
+                        messagebox.showinfo("Packet Loss", f"Packet {i+1}: Lost due to congestion")
+                    else:
+                        # Successfully send packet
+                        packet = Packet(source_node, dest_node, path)
+                        packet.total_latency = total_latency
+                        if source_node.tcp_control:
+                            packet.cwnd = source_node.tcp_control.get_window_size()
+                            packet.algorithm = source_node.tcp_control.algorithm
+                        self.packets.append(packet)
+                        
+                        source_node.packets_in_flight += 1
+                        if source_node.tcp_control:
+                            source_node.tcp_control.packets_sent += 1
+                        
+                        # Simulate ACK after packet completes journey
+                        self.root.after(int(total_latency), 
+                                    lambda s=source_node, p=path: self.handle_packet_ack(s, p))
+                        
+                        # Update congestion based on cwnd
+                        congestion_factor = 1.0 / max(1, source_node.tcp_control.get_window_size() if source_node.tcp_control else 1)
+                        
+                        if self.traffic_load == "light":
+                            congestion_factor *= 0.5
+                        elif self.traffic_load == "heavy":
+                            congestion_factor *= 2
+                        
+                        for node in path:
+                            node.congestion = min(10, node.congestion + congestion_factor)
+                        
+                        # Track performance
+                        self.track_performance(total_latency, len(path))
+                        
+                        sent_count += 1
+                        self.status_label.config(text=f"Sent packet {i+1}/{num_packets} from {source_name} to {dest_name}")
+                else:
+                    messagebox.showerror("No Route", f"Packet {i+1}: No path found between nodes")
+                
+                # Small delay between packet sends
+                self.root.update()
+                if i < num_packets - 1:
+                    sender_window.after(200)
+            
+            # Show result
+            if sent_count > 0:
+                messagebox.showinfo("Success", f"Sent {sent_count}/{num_packets} packets successfully!\n\n" + 
+                                   f"Path: {source_name} → {dest_name}\n" + 
+                                   f"Hops: {len(path)-1}\n" + 
+                                   f"Latency: {total_latency:.2f}ms")
+                self.draw_network()
+                sender_window.destroy()
+        
+        # Buttons
+        btn_frame = tk.Frame(sender_window, bg=self.colors['bg'])
+        btn_frame.pack(pady=15)
+        
+        send_btn = tk.Button(btn_frame, text="📤 Send Packet(s)",
+                           command=send_packets,
+                           bg=self.colors['success'], fg="white",
+                           font=("Segoe UI", 11, "bold"),
+                           relief=tk.FLAT, cursor="hand2", padx=25, pady=12)
+        send_btn.pack(side=tk.LEFT, padx=5)
+        
+        cancel_btn = tk.Button(btn_frame, text="Cancel",
+                             command=sender_window.destroy,
+                             bg=self.colors['secondary'], fg="white",
+                             font=("Segoe UI", 11, "bold"),
+                             relief=tk.FLAT, cursor="hand2", padx=25, pady=12)
+        cancel_btn.pack(side=tk.LEFT, padx=5)
 
 if __name__ == "__main__":
     root = tk.Tk()
